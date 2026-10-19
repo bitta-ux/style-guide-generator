@@ -1,6 +1,6 @@
 {
   "name": "Style Guide Generator by Bitta.ux",
-  "id": <"add your Plugin-ID here">,
+  "id": "1608716453645387605",
   "api": "1.0.0",
   "main": "code.js",
   "ui": "ui.html",

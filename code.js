@@ -1,4 +1,4 @@
-// Style Guide Generator by Bitta.ux — v4
+// Style Guide Generator by Bitta.ux — v4.1
 
 figma.showUI(__html__, { width: 380, height: 620, title: 'Style Guide Generator' });
 
@@ -31,10 +31,17 @@ async function doScan() {
       groups[g] = true;
     });
 
+    var floatGroups = {};
+    floatVars.forEach(function(v) {
+      var parts = v.name.split('/');
+      floatGroups[parts[0]] = true;
+    });
+
     figma.ui.postMessage({ type: 'scan-result', data: {
       colorCount: colorVars.length,
       colorGroupCount: Object.keys(groups).length,
       spacingCount: floatVars.length,
+      spacingGroupCount: Object.keys(floatGroups).length,
       textStyleCount: styles.length,
     }});
   } catch(e) {
@@ -55,11 +62,13 @@ async function doGenerate(selected) {
     var styles = await figma.getLocalTextStylesAsync();
     var collections = figma.variables ? await figma.variables.getLocalVariableCollectionsAsync() : [];
     var colorVars = vars.filter(function(v){ return v.resolvedType === 'COLOR'; });
+    var floatVars = vars.filter(function(v){ return v.resolvedType === 'FLOAT'; });
 
     // dynamic-page: work within the current page only
     var page = figma.currentPage;
-    // Remove any previously generated style guide frames (named with // prefix)
-    var existing = page.children.filter(function(n) { return n.name.indexOf('//') === 0; });
+    // Remove only frames this plugin generated: tagged via plugin data, or
+    // the exact legacy names from versions that predate tagging.
+    var existing = page.children.filter(isGeneratedFrame);
     existing.forEach(function(n) { n.remove(); });
 
     var cx = 80;
@@ -67,6 +76,7 @@ async function doGenerate(selected) {
     if (selected.colors && colorVars.length > 0) {
       prog(15, 'Building colors...');
       var cf = await buildColors(colorVars, collections);
+      tagGenerated(cf);
       cf.x = cx; cf.y = 80;
       page.appendChild(cf);
       cx += cf.width + 120;
@@ -76,10 +86,21 @@ async function doGenerate(selected) {
     if (selected.typography && styles.length > 0) {
       prog(55, 'Building typography...');
       var tf = await buildTypography(styles);
+      tagGenerated(tf);
       tf.x = cx; tf.y = 80;
       page.appendChild(tf);
       cx += tf.width + 120;
-      prog(95, 'Typography done');
+      prog(87, 'Typography done');
+    }
+
+    if (selected.sizing && floatVars.length > 0) {
+      prog(90, 'Building sizing & spacing...');
+      var sf = await buildSizing(floatVars, collections);
+      tagGenerated(sf);
+      sf.x = cx; sf.y = 80;
+      page.appendChild(sf);
+      cx += sf.width + 120;
+      prog(97, 'Sizing done');
     }
 
     if (page.children.length > 0) figma.viewport.scrollAndZoomIntoView(page.children);
@@ -92,12 +113,24 @@ async function doGenerate(selected) {
 
 function prog(pct, label) { figma.ui.postMessage({ type: 'progress', pct: pct, label: label }); }
 
+var PLUGIN_DATA_KEY = 'styleGuideGenerator';
+var LEGACY_FRAME_NAMES = ['//PRIMITIVE COLORS', '//TYPOGRAPHY', '//SIZING & SPACING'];
+
+function tagGenerated(node) {
+  try { node.setPluginData(PLUGIN_DATA_KEY, 'generated'); } catch(e) {}
+}
+
+function isGeneratedFrame(node) {
+  try { if (node.getPluginData(PLUGIN_DATA_KEY) === 'generated') return true; } catch(e) {}
+  return LEGACY_FRAME_NAMES.indexOf(node.name) !== -1;
+}
+
 // ─── PRIMITIVES ───────────────────────────────────────────────────────────────
 
 function fr(name, x, y, w, h, bg, radius) {
   var f = figma.createFrame();
   f.name = name; f.x = x; f.y = y; f.resize(w, h);
-  f.fills = bg ? [{ type:'SOLID', color: bg }] : [];
+  f.fills = bg ? [{ type:'SOLID', color: { r:bg.r, g:bg.g, b:bg.b } }] : [];
   if (radius) f.cornerRadius = radius;
   f.clipsContent = false;
   return f;
@@ -106,37 +139,21 @@ function fr(name, x, y, w, h, bg, radius) {
 function rc(name, x, y, w, h, color, radius) {
   var r = figma.createRectangle();
   r.name = name; r.x = x; r.y = y; r.resize(w, h);
-  r.fills = color ? [{ type:'SOLID', color: color }] : [];
+  r.fills = color ? [{ type:'SOLID', color: { r:color.r, g:color.g, b:color.b } }] : [];
   if (radius) r.cornerRadius = radius;
   return r;
 }
 
-// Bind a color variable to a rectangle's fill
-function bindColor(node, variable) {
-  try {
-    var boundFill = figma.variables.setBoundVariableForPaint(
-      { type: 'SOLID', color: { r:0,g:0,b:0 } },
-      'color',
-      variable
-    );
-    node.fills = [boundFill];
-  } catch(e) {
-    // fallback: just set the resolved color
-    try {
-      var col = collections ? getResolvedColor(variable) : null;
-      if (col) node.fills = [{ type:'SOLID', color: col }];
-    } catch(e2) {}
-  }
-}
-
 // Bind a color variable to a frame/shape fill
 function bindFill(node, variable, fallbackColor) {
+  var c = fallbackColor || {r:0,g:0,b:0};
+  var paint = { type: 'SOLID', color: { r:c.r, g:c.g, b:c.b } };
+  if (typeof c.a === 'number' && c.a < 1) paint.opacity = c.a;
   try {
-    var paint = { type: 'SOLID', color: fallbackColor || {r:0,g:0,b:0} };
     var bound = figma.variables.setBoundVariableForPaint(paint, 'color', variable);
     node.fills = [bound];
   } catch(e) {
-    if (fallbackColor) node.fills = [{ type:'SOLID', color: fallbackColor }];
+    node.fills = [paint];
   }
 }
 
@@ -153,9 +170,21 @@ async function tx(str, x, y, size, font, color, maxW) {
   return t;
 }
 
-function hexOf(r,g,b) {
+// 6-digit hex, or 8-digit (RRGGBBAA) when the color is translucent
+function hexOf(r,g,b,a) {
   function h(v){ return Math.round(v*255).toString(16).padStart(2,'0'); }
-  return ('#'+h(r)+h(g)+h(b)).toUpperCase();
+  var hex = '#'+h(r)+h(g)+h(b);
+  if (typeof a === 'number' && a < 1) hex += h(a);
+  return hex.toUpperCase();
+}
+
+// Numeric shade names sort ascending and come first; everything else sorts alphabetically after
+function compareShades(a, b) {
+  var na = /^\d+(\.\d+)?$/.test(a), nb = /^\d+(\.\d+)?$/.test(b);
+  if (na && nb) return parseFloat(a) - parseFloat(b);
+  if (na) return -1;
+  if (nb) return 1;
+  return a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' });
 }
 
 function lum(r,g,b){ return 0.2126*r + 0.7152*g + 0.0722*b; }
@@ -203,9 +232,10 @@ async function buildColors(colorVars, collections) {
   // Each shade stores its value per mode
   var groups = {};
 
-  colorVars.forEach(function(v) {
+  for (var ci = 0; ci < colorVars.length; ci++) {
+    var v = colorVars[ci];
     var col = collections.find(function(c){ return c.id === v.variableCollectionId; });
-    if (!col) return;
+    if (!col) continue;
     var parts = v.name.split('/');
     var shade = parts[parts.length - 1];
     var groupName = parts.length > 1 ? parts.slice(0, -1).join('/') : 'Colors';
@@ -221,28 +251,27 @@ async function buildColors(colorVars, collections) {
 
     // Build per-mode color values
     var modeValues = [];
-    col.modes.forEach(function(mode) {
-      var val = v.valuesByMode[mode.modeId];
-      var resolved = resolveColorValue(val, collections, mode.modeId);
+    for (var mi0 = 0; mi0 < col.modes.length; mi0++) {
+      var mode0 = col.modes[mi0];
+      var val = v.valuesByMode[mode0.modeId];
+      var resolved = await resolveColorValue(val, collections, mode0.modeId);
       modeValues.push({
-        modeId: mode.modeId,
-        modeName: mode.name,
-        color: resolved || { r:0.8, g:0.8, b:0.8 }
+        modeId: mode0.modeId,
+        modeName: mode0.name,
+        color: resolved || { r:0.8, g:0.8, b:0.8, a:1 }
       });
-    });
+    }
 
     groups[key].shades.push({
       shade: shade,
       variable: v,
       modeValues: modeValues
     });
-  });
+  }
 
-  // Sort shades numerically within each group
+  // Sort shades: numeric names ascending first (50, 100, 200…), then the rest alphabetically
   Object.values(groups).forEach(function(g) {
-    g.shades.sort(function(a, b) {
-      return (parseInt(a.shade) || 0) - (parseInt(b.shade) || 0);
-    });
+    g.shades.sort(function(a, b) { return compareShades(a.shade, b.shade); });
   });
 
   var groupList = Object.values(groups);
@@ -363,7 +392,7 @@ async function buildColors(colorVars, collections) {
 
         // Hex value for this specific mode
         var hexTxt = await tx(
-          hexOf(swatchColor.r, swatchColor.g, swatchColor.b),
+          hexOf(swatchColor.r, swatchColor.g, swatchColor.b, swatchColor.a),
           sx + 8, SWATCH_COLOR_H + 24,
           10, {family:'Inter', style:'Regular'},
           {r:0.32, g:0.32, b:0.32}
@@ -384,12 +413,16 @@ async function buildColors(colorVars, collections) {
 }
 
 // Recursively resolve a color variable value for a specific mode
-function resolveColorValue(val, collections, modeId) {
-  if (!val) return null;
-  if (typeof val === 'object' && 'r' in val) return { r:val.r, g:val.g, b:val.b };
+// Uses getVariableByIdAsync — the sync variant is unavailable under "dynamic-page" document access.
+async function resolveColorValue(val, collections, modeId, depth) {
+  depth = depth || 0;
+  if (!val || depth > 20) return null;
+  if (typeof val === 'object' && 'r' in val) {
+    return { r:val.r, g:val.g, b:val.b, a: (typeof val.a === 'number' ? val.a : 1) };
+  }
   if (val.type === 'VARIABLE_ALIAS') {
     try {
-      var aliasVar = figma.variables.getVariableById(val.id);
+      var aliasVar = await figma.variables.getVariableByIdAsync(val.id);
       if (!aliasVar) return null;
       var aliasColl = collections.find(function(c){ return c.id === aliasVar.variableCollectionId; });
       // Use the passed modeId if this collection has it, otherwise fall back to default
@@ -398,7 +431,7 @@ function resolveColorValue(val, collections, modeId) {
         var modeExists = aliasColl.modes.some(function(m){ return m.modeId === modeId; });
         if (!modeExists) resolvedModeId = aliasColl.defaultModeId;
       }
-      return resolveColorValue(aliasVar.valuesByMode[resolvedModeId], collections, resolvedModeId);
+      return await resolveColorValue(aliasVar.valuesByMode[resolvedModeId], collections, resolvedModeId, depth + 1);
     } catch(e) { return null; }
   }
   return null;
@@ -572,6 +605,201 @@ async function buildTypography(textStyles) {
   }
 
   return wrap;
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// SIZING & SPACING
+// ═════════════════════════════════════════════════════════════════════════════
+async function buildSizing(floatVars, collections) {
+  var ROW_H = 48;
+  var BAR_H = 24;
+  var BAR_TRACK_W = 360;
+  var BAR_MAX_W = 320;
+  var COL_NAME_X = 20;
+  var COL_BAR_X = 280;
+  var COL_VAL_X = 660;
+  var COL_ALIAS_X = 780;
+  var BADGE_H = 39;
+  var INNER_PAD = 20;
+  var CARD_PAD = 16;
+  var HDR_H = 32;
+
+  var ACCENTS = [
+    {r:0.25, g:0.55, b:0.95},
+    {r:0.15, g:0.72, b:0.60},
+    {r:0.93, g:0.42, b:0.16},
+    {r:0.60, g:0.35, b:0.95},
+    {r:0.18, g:0.78, b:0.45},
+    {r:0.95, g:0.26, b:0.45},
+  ];
+
+  // Group by collection + top-level prefix
+  var groups = {};
+  floatVars.forEach(function(v) {
+    var col = collections.find(function(c){ return c.id === v.variableCollectionId; });
+    if (!col) return;
+    var parts = v.name.split('/');
+    var groupName = parts.length > 1 ? parts[0] : 'General';
+    var key = col.id + '||' + groupName;
+    if (!groups[key]) groups[key] = { name: groupName, collection: col, vars: [] };
+    groups[key].vars.push(v);
+  });
+
+  // Sort each group by resolved default-mode value ascending
+  var groupList = Object.values(groups);
+  for (var sgi = 0; sgi < groupList.length; sgi++) {
+    var sg = groupList[sgi];
+    var sDefModeId = sg.collection.defaultModeId;
+    var sortVals = {};
+    for (var svi = 0; svi < sg.vars.length; svi++) {
+      var sv = sg.vars[svi];
+      sortVals[sv.id] = await resolveFloatValue(sv.valuesByMode[sDefModeId], collections, sDefModeId);
+    }
+    sg.vars.sort(function(a, b) { return sortVals[a.id] - sortVals[b.id]; });
+  }
+
+  var wrap = fr('//SIZING & SPACING', 0, 0, WRAP_W, 100, {r:1,g:1,b:1}, 32);
+  addStroke(wrap, {r:0.86,g:0.85,b:0.86}, 1);
+  wrap.clipsContent = true;
+
+  var hero = await buildHero('Sizing & Spacing', CONTENT_W);
+  hero.x = WRAP_PAD; hero.y = WRAP_PAD;
+  wrap.appendChild(hero);
+
+  var cardY = WRAP_PAD + 320 + WRAP_GAP;
+
+  for (var gi = 0; gi < groupList.length; gi++) {
+    var g = groupList[gi];
+    var accent = ACCENTS[gi % ACCENTS.length];
+    var tint = { r:accent.r+(1-accent.r)*0.91, g:accent.g+(1-accent.g)*0.91, b:accent.b+(1-accent.b)*0.91 };
+    var modes = g.collection.modes;
+    var numModes = modes.length;
+    var defModeId = g.collection.defaultModeId;
+
+    var innerW = CONTENT_W - CARD_PAD * 2;
+    var rowW = innerW - INNER_PAD * 2;
+
+    // Card height: badge + header row + (rows per mode + mode labels) for each mode
+    var rowsPerMode = g.vars.length;
+    var modeLabelH = numModes > 1 ? 20 : 0;
+    var totalRowsH = numModes * (rowsPerMode * ROW_H + (rowsPerMode - 1) * 1 + modeLabelH);
+    var INNER_H = INNER_PAD + BADGE_H + 16 + HDR_H + 8 + totalRowsH + INNER_PAD;
+    var CARD_H = CARD_PAD * 2 + INNER_H;
+
+    var card = fr('Group: ' + g.name, WRAP_PAD, cardY, CONTENT_W, CARD_H, tint, 24);
+    var inner = fr('Inner', CARD_PAD, CARD_PAD, innerW, INNER_H, {r:1,g:1,b:1}, 20);
+    card.appendChild(inner);
+
+    // Badge
+    var badgeTextColor = lum(accent.r, accent.g, accent.b) > 0.35 ? {r:0.1,g:0.1,b:0.1} : {r:1,g:1,b:1};
+    var badgeLabelTxt = await tx(g.name.toUpperCase(), 0, 0, 12, {family:'Inter',style:'Semi Bold'}, badgeTextColor);
+    var bW = badgeLabelTxt.width + 24;
+    var badge = fr('Badge', INNER_PAD, INNER_PAD, bW, BADGE_H, accent, 24);
+    badgeLabelTxt.x = 12;
+    badgeLabelTxt.y = Math.round((BADGE_H - badgeLabelTxt.height) / 2);
+    badge.appendChild(badgeLabelTxt);
+    inner.appendChild(badge);
+
+    // Column header row
+    var hdrY = INNER_PAD + BADGE_H + 16;
+    var hdrColor = {r:0.6,g:0.6,b:0.6};
+    var hdrFont = {family:'Inter',style:'Regular'};
+    var hdrVY = Math.round((HDR_H - 12) / 2);
+    inner.appendChild(await tx('TOKEN', COL_NAME_X, hdrY + hdrVY, 10, hdrFont, hdrColor));
+    inner.appendChild(await tx('VISUAL', COL_BAR_X, hdrY + hdrVY, 10, hdrFont, hdrColor));
+    inner.appendChild(await tx('VALUE', COL_VAL_X, hdrY + hdrVY, 10, hdrFont, hdrColor));
+    inner.appendChild(await tx('ALIAS', COL_ALIAS_X, hdrY + hdrVY, 10, hdrFont, hdrColor));
+
+    var contentY = hdrY + HDR_H + 8;
+
+    for (var mi = 0; mi < numModes; mi++) {
+      var mode = modes[mi];
+      var modeId = mode.modeId;
+
+      if (numModes > 1) {
+        var modeLabel = await tx(mode.name, COL_NAME_X, contentY, 10, {family:'Inter',style:'Regular'}, {r:0.6,g:0.6,b:0.6});
+        inner.appendChild(modeLabel);
+        contentY += modeLabelH;
+      }
+
+      for (var vi = 0; vi < g.vars.length; vi++) {
+        var v = g.vars[vi];
+        var rawVal = v.valuesByMode[modeId] !== undefined ? v.valuesByMode[modeId] : v.valuesByMode[defModeId];
+        var resolvedVal = await resolveFloatValue(rawVal, collections, modeId);
+        var barW = Math.max(1, Math.min(Math.round(resolvedVal), BAR_MAX_W));
+        var rowY = contentY + vi * (ROW_H + 1);
+        var nameParts = v.name.split('/');
+        var leafName = nameParts[nameParts.length - 1];
+
+        // Row bg (alternating subtle)
+        if (vi % 2 === 1) {
+          inner.appendChild(rc('row-bg', CARD_PAD, rowY, rowW, ROW_H, {r:0.97,g:0.97,b:0.97}, 0));
+        }
+
+        // Token name
+        var barVY = rowY + Math.round((ROW_H - BAR_H) / 2);
+        var nameVY = rowY + Math.round((ROW_H - 13) / 2);
+        inner.appendChild(await tx(leafName, COL_NAME_X, nameVY, 12, {family:'Inter',style:'Medium'}, {r:0.15,g:0.15,b:0.14}));
+
+        // Bar track
+        inner.appendChild(rc('track', COL_BAR_X, barVY, BAR_TRACK_W, BAR_H, {r:0.94,g:0.94,b:0.94}, 6));
+
+        // Bar fill
+        var bar = rc('bar', COL_BAR_X, barVY, barW, BAR_H, accent, 6);
+        // Best-effort variable binding to width dimension
+        try { bar.setBoundVariable('width', v); } catch(e) {}
+        inner.appendChild(bar);
+
+        // Value label
+        var displayVal = Number.isInteger(resolvedVal) ? resolvedVal + 'px' : resolvedVal.toFixed(1) + 'px';
+        inner.appendChild(await tx(displayVal, COL_VAL_X, nameVY, 11, {family:'Inter',style:'Regular'}, {r:0.32,g:0.32,b:0.32}));
+
+        // Alias label (if this variable references another)
+        if (rawVal && typeof rawVal === 'object' && rawVal.type === 'VARIABLE_ALIAS') {
+          try {
+            var aliasVar = await figma.variables.getVariableByIdAsync(rawVal.id);
+            if (aliasVar) {
+              var aliasParts = aliasVar.name.split('/');
+              inner.appendChild(await tx(aliasParts[aliasParts.length - 1], COL_ALIAS_X, nameVY, 10, {family:'Inter',style:'Regular'}, {r:0.6,g:0.6,b:0.6}));
+            }
+          } catch(e) {}
+        }
+
+        // Row divider
+        if (vi < g.vars.length - 1) {
+          inner.appendChild(rc('divider', CARD_PAD, rowY + ROW_H, rowW, 1, {r:0.92,g:0.92,b:0.92}, 0));
+        }
+      }
+
+      contentY += rowsPerMode * ROW_H + (rowsPerMode - 1) * 1 + (mi < numModes - 1 ? modeLabelH + 8 : 0);
+    }
+
+    wrap.appendChild(card);
+    cardY += CARD_H + 16;
+  }
+
+  wrap.resize(WRAP_W, cardY + WRAP_PAD);
+  return wrap;
+}
+
+async function resolveFloatValue(val, collections, modeId, depth) {
+  depth = depth || 0;
+  if (val === null || val === undefined || depth > 20) return 0;
+  if (typeof val === 'number') return val;
+  if (val.type === 'VARIABLE_ALIAS') {
+    try {
+      var aliasVar = await figma.variables.getVariableByIdAsync(val.id);
+      if (!aliasVar) return 0;
+      var aliasColl = collections.find(function(c){ return c.id === aliasVar.variableCollectionId; });
+      var resolvedModeId = modeId;
+      if (aliasColl) {
+        var modeExists = aliasColl.modes.some(function(m){ return m.modeId === modeId; });
+        if (!modeExists) resolvedModeId = aliasColl.defaultModeId;
+      }
+      return await resolveFloatValue(aliasVar.valuesByMode[resolvedModeId], collections, resolvedModeId, depth + 1);
+    } catch(e) { return 0; }
+  }
+  return 0;
 }
 
 function getTypoMeta(style) {

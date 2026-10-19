@@ -80,7 +80,7 @@
     /* Stats Grid */
     .stats-grid {
       display: grid;
-      grid-template-columns: repeat(2, 1fr);
+      grid-template-columns: repeat(3, 1fr);
       gap: 8px;
       margin-bottom: 16px;
     }
@@ -471,6 +471,10 @@
             <div class="stat-num" id="statStyles">—</div>
             <div class="stat-label">Text Styles</div>
           </div>
+          <div class="stat-card">
+            <div class="stat-num" id="statSpacing">—</div>
+            <div class="stat-label">Spacing Tokens</div>
+          </div>
         </div>
 
         <button class="secondary" id="scanBtn" onclick="doScan()">
@@ -507,6 +511,15 @@
           <div class="template-checkbox" id="chk-typography"></div>
         </div>
 
+        <!-- Sizing & Spacing Template -->
+        <div class="template-item" id="tmpl-sizing" onclick="toggleTemplate('sizing')">
+          <div class="template-icon">📐</div>
+          <div class="template-info">
+            <div class="template-name">Sizing & Spacing</div>
+            <div class="template-meta" id="meta-sizing">—</div>
+          </div>
+          <div class="template-checkbox" id="chk-sizing"></div>
+        </div>
 
         <div class="divider"></div>
 
@@ -524,7 +537,7 @@
           ✨ Generate Style Guide
         </button>
 
-        <p class="note">Creates a new "Style Guide" page in your Figma file with all tokens live-linked</p>
+        <p class="note">Generates style guide frames on your current page with all tokens live-linked. Re-running replaces the previous guide.</p>
       </div>
 
     </div>
@@ -539,7 +552,7 @@
 
   <script>
     var scanData = null;
-    var selected = { colors: false, typography: false };
+    var selected = { colors: false, typography: false, sizing: false };
     var allSelectable = [];
 
     function doScan() {
@@ -554,9 +567,10 @@
       // Update stat cards
       document.getElementById('statColors').textContent = data.colorCount || 0;
       document.getElementById('statStyles').textContent = data.textStyleCount || 0;
+      document.getElementById('statSpacing').textContent = data.spacingCount || 0;
 
       // Reset selections
-      selected = { colors: false, typography: false, spacing: false };
+      selected = { colors: false, typography: false, sizing: false };
       allSelectable = [];
 
       // Colors
@@ -564,6 +578,9 @@
 
       // Typography
       updateTemplateItem('typography', data.textStyleCount, data.textStyleCount + ' text styles');
+
+      // Sizing
+      updateTemplateItem('sizing', data.spacingCount, data.spacingCount + ' tokens across ' + data.spacingGroupCount + ' groups');
 
       // Show templates section
       document.getElementById('templatesSection').classList.add('show');
